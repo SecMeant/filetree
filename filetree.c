@@ -747,7 +747,7 @@ static void draw_left(Buf *b, uint32_t i, int w, int ow, int gw, int show_og, in
 }
 
 static const char help[] =
-	" j/k:move  l:expand  h:collapse  -:up dir  space:select  Esc:deselect  c:copy  m:move  d:delete  s:dir size  /:fzf  "
+	" j/k:move  ^D/^U:half page  l:expand  h:collapse  -:up dir  space:select  Esc:deselect  c:copy  m:move  d:delete  s:dir size  /:fzf "
 	"H/J/K/L:scroll preview  r:refresh  q:quit";
 
 static Buf fb;
@@ -1259,6 +1259,16 @@ int main(int argc, char **argv)
 		case 'q': case 3: quit_flag = 1; break;
 		case 'j': case K_DOWN: if (cur + 1 < n) cur++; break;
 		case 'k': case K_UP: if (cur > 0) cur--; break;
+		case 4: { /* Ctrl-D: half page down */
+			uint32_t st = (term_h - 2) / 2 ? (term_h - 2) / 2 : 1;
+			if (n) cur = cur + st < n ? cur + st : n - 1;
+			break;
+		}
+		case 21: { /* Ctrl-U: half page up */
+			uint32_t st = (term_h - 2) / 2 ? (term_h - 2) / 2 : 1;
+			cur = cur > st ? cur - st : 0;
+			break;
+		}
 		case 'g': cur = 0; break;
 		case 'G': if (n) cur = n - 1; break;
 		case 'l': case K_RIGHT:
