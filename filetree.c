@@ -210,12 +210,43 @@ static void sel_toggle(uint32_t i)
 
 /* ------------------------------------------------------------ dir loading */
 
+/* Cache of recursive directory sizes computed with 's', keyed by path. */
+static char **szc_path; static int64_t *szc_val; static size_t szc_n, szc_cap;
+
+static int64_t szc_get(const char *p)
+{
+	for (size_t i = 0; i < szc_n; i++) if (!strcmp(szc_path[i], p)) return szc_val[i];
+	return -1;
+}
+static void szc_set(const char *p, int64_t v)
+{
+	for (size_t i = 0; i < szc_n; i++) if (!strcmp(szc_path[i], p)) { szc_val[i] = v; return; }
+	if (szc_n == szc_cap) {
+		szc_cap = szc_cap ? szc_cap * 2 : 16;
+		szc_path = xrealloc(szc_path, szc_cap * sizeof *szc_path);
+		szc_val = xrealloc(szc_val, szc_cap * sizeof *szc_val);
+	}
+	szc_path[szc_n] = strdup(p); szc_val[szc_n++] = v;
+}
+static void szc_clear(void)
+{
+	for (size_t i = 0; i < szc_n; i++) free(szc_path[i]);
+	szc_n = 0;
+}
+
+enum { SORT_NAME, SORT_SIZE, SORT_MTIME };
+static int sort_mode;
+
 static const Tree *sort_t;
 static int cmp_perm(const void *a, const void *b)
 {
 	uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
 	int dx = sort_t->flags[x] & F_DIR, dy = sort_t->flags[y] & F_DIR;
 	if (dx != dy) return dy - dx;
+	if (sort_mode == SORT_SIZE && sort_t->size[x] != sort_t->size[y])
+		return sort_t->size[x] < sort_t->size[y] ? 1 : -1;
+	if (sort_mode == SORT_MTIME && sort_t->mtime[x] != sort_t->mtime[y])
+		return sort_t->mtime[x] < sort_t->mtime[y] ? 1 : -1;
 	const char *nx = arena + sort_t->name[x], *ny = arena + sort_t->name[y];
 	int c = strcasecmp(nx, ny);
 	return c ? c : strcmp(nx, ny);
@@ -245,9 +276,14 @@ static int load_dir(const char *path, int depth, uint32_t pos)
 			ssize_t l = readlinkat(fd, e->d_name, tg, sizeof tg - 1);
 			if (l > 0) t.link[k] = arena_add(tg, l);
 		} else if (S_ISREG(st.st_mode) && (st.st_mode & 0111)) fl |= F_EXE;
-		t.name[k] = arena_add(e->d_name, strlen(e->d_name));
-		t.mode[k] = st.st_mode; t.uid[k] = st.st_uid; t.gid[k] = st.st_gid;
 		t.size[k] = S_ISDIR(st.st_mode) ? -1 : st.st_size;
+		t.name[k] = arena_add(e->d_name, strlen(e->d_name));
+		if (fl & F_DIR) {
+			char cp[PATH_MAX];
+			if (szc_n && snprintf(cp, sizeof cp, "%s/%s", path[1] ? path : "", e->d_name) < (int)sizeof cp)
+				t.size[k] = szc_get(cp);
+		}
+		t.mode[k] = st.st_mode; t.uid[k] = st.st_uid; t.gid[k] = st.st_gid;
 		t.mtime[k] = st.st_mtime; t.flags[k] = fl;
 	}
 	closedir(d);
@@ -747,7 +783,7 @@ static void draw_left(Buf *b, uint32_t i, int w, int ow, int gw, int show_og, in
 }
 
 static const char help[] =
-	" j/k:move  ^D/^U:half page  l:expand  h:collapse  -:up dir  space:select  Esc:deselect  c:copy  m:move  d:delete  s:dir size  /:fzf "
+	" j/k:move  ^D/^U:half page  l:expand  h:collapse  -:up dir  space:select  Esc:deselect  c:copy  m:move  d:delete  s:dir size  S/M/X:sort size/date/name  /:fzf "
 	"H/J/K/L:scroll preview  r:refresh  q:quit";
 
 static Buf fb;
@@ -1058,6 +1094,7 @@ static void do_transfer(int move)
 		else done++;
 	}
 	sel_clear();
+	szc_clear();
 	rebuild();
 	if (failed) snprintf(status, sizeof status, "%d ok, %d failed (%s)", done, failed, firsterr);
 	else snprintf(status, sizeof status, "%s %d item%s", move ? "moved" : "copied", done, done == 1 ? "" : "s");
@@ -1082,6 +1119,7 @@ static void do_size(void)
 	sz_total = 0;
 	nftw(p, sz_cb, 16, FTW_PHYS);
 	T.size[cur] = sz_total;
+	szc_set(p, sz_total);
 }
 
 static void do_delete(void)
@@ -1110,6 +1148,7 @@ static void do_delete(void)
 			} else done++;
 		}
 		sel_clear();
+		szc_clear();
 		rebuild();
 		if (failed) snprintf(status, sizeof status, "%d deleted, %d failed (%s)", done, failed, firsterr);
 		else snprintf(status, sizeof status, "deleted %d item%s", done, done == 1 ? "" : "s");
@@ -1294,9 +1333,15 @@ int main(int argc, char **argv)
 		case 'm': do_transfer(1); break;
 		case 'd': do_delete(); break;
 		case 's': do_size(); break;
+		case 'S': case 'M': case 'X':
+			sort_mode = k == 'S' ? SORT_SIZE : k == 'M' ? SORT_MTIME : SORT_NAME;
+			rebuild(); P.valid = 0;
+			snprintf(status, sizeof status, "sort: %s", sort_mode == SORT_SIZE ? "size (largest first)" :
+				 sort_mode == SORT_MTIME ? "modified (newest first)" : "name");
+			break;
 		case '-': go_up(); break;
 		case '/': do_fzf(); break;
-		case 'r': rebuild(); P.valid = 0; break;
+		case 'r': szc_clear(); rebuild(); P.valid = 0; break;
 		case 'J': preview_scroll(1, 0); break;
 		case 'K': preview_scroll(-1, 0); break;
 		case 'H': preview_scroll(0, -4); break;
