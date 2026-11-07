@@ -528,7 +528,7 @@ image_png: ;
 image_jpg: ;
 	free(buf);
 	err = "";
-	P.rgb = img_load_jpeg(path, term_w / 2, (term_h - 1) * 2, &P.iw, &P.ih, &err);
+	P.rgb = img_load_jpeg(path, term_w / 2, (term_h - 2) * 2, &P.iw, &P.ih, &err);
 	if (!P.rgb) { preview_msg(err); return; }
 	P.kind = P_IMAGE;
 }
@@ -733,7 +733,7 @@ static Buf fb;
 
 static void draw(void)
 {
-	int mh = term_h - 1;
+	int mh = term_h - 2;
 	int rw = term_w / 2, lw = term_w - rw;
 	fb.n = 0;
 	b_str(&fb, "\x1b[?25l");
@@ -764,6 +764,22 @@ static void draw(void)
 		b_str(&fb, "\x1b[90m\xe2\x94\x82\x1b[0m");
 		preview_row(&fb, r, rw - 1);
 	}
+	b_fmt(&fb, "\x1b[%d;1H\x1b[1;34m", term_h - 1);
+	int pc = put_cols(&fb, " ", 1, term_w);
+	{
+		const char *dir = root[0] ? root : "/";
+		int dl = strlen(dir), cols = 0;
+		for (int q = 0; q < dl; q++) cols += ((unsigned char)dir[q] & 0xC0) != 0x80;
+		if (cols > term_w - 2) { /* keep the tail, show leading ellipsis */
+			int skip = cols - (term_w - 3);
+			const char *p = dir;
+			while (skip > 0 && *p) { p++; while (((unsigned char)*p & 0xC0) == 0x80) p++; skip--; }
+			pc += put_cols(&fb, "\xe2\x80\xa6", 3, term_w - pc);
+			pc += put_cols(&fb, p, strlen(p), term_w - pc);
+		} else pc += put_cols(&fb, dir, dl, term_w - pc);
+	}
+	b_rep(&fb, ' ', term_w - pc);
+	b_str(&fb, "\x1b[0m");
 	b_fmt(&fb, "\x1b[%d;1H\x1b[7m", term_h);
 	char extra[320] = "";
 	if (status[0]) snprintf(extra, sizeof extra, " | %s ", status);
@@ -819,7 +835,7 @@ static void get_size(void)
 		term_w = ws.ws_col; term_h = ws.ws_row;
 	}
 	if (term_w < 20) term_w = 20;
-	if (term_h < 3) term_h = 3;
+	if (term_h < 4) term_h = 4;
 }
 static void on_winch(int s) { (void)s; resized = 1; }
 static void on_term(int s) { (void)s; quit_flag = 1; }
