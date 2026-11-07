@@ -726,7 +726,7 @@ static void draw_left(Buf *b, uint32_t i, int w, int ow, int gw, int show_og, in
 }
 
 static const char help[] =
-	" j/k:move  l:expand  h:collapse  space:select  Esc:deselect  c:copy  m:move  "
+	" j/k:move  l:expand  h:collapse  -:up dir  space:select  Esc:deselect  c:copy  m:move  "
 	"H/J/K/L:scroll preview  r:refresh  q:quit";
 
 static Buf fb;
@@ -1028,6 +1028,23 @@ out:
 	P.valid = 0;
 }
 
+/* Make the parent of the current root the new root, cursor on the old root. */
+static void go_up(void)
+{
+	if (!rootlen) return;
+	char old[PATH_MAX];
+	snprintf(old, sizeof old, "%s", strrchr(root, '/') + 1);
+	char *sl = strrchr(root, '/');
+	if (sl == root) { root[1] = 0; rootlen = 0; } else { *sl = 0; rootlen = strlen(root); }
+	if (chdir(root) < 0) { snprintf(status, sizeof status, "cannot enter %.150s", root); return; }
+	tree_free(&T); arena_n = 0;
+	load_dir(root, 0, 0);
+	cur = 0; top = 0;
+	for (uint32_t i = 0; i < T.n; i++)
+		if (!strcmp(NAME(i), old)) { cur = i; expand(i); break; }
+	P.valid = 0;
+}
+
 /* ------------------------------------------------------------------ main */
 
 int main(int argc, char **argv)
@@ -1091,6 +1108,7 @@ int main(int argc, char **argv)
 		case K_ESC: sel_clear(); break;
 		case 'c': do_transfer(0); break;
 		case 'm': do_transfer(1); break;
+		case '-': go_up(); break;
 		case 'r': rebuild(); P.valid = 0; break;
 		case 'J': preview_scroll(1, 0); break;
 		case 'K': preview_scroll(-1, 0); break;
