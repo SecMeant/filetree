@@ -96,7 +96,7 @@ enum { F_DIR = 1, F_EXP = 2, F_SEL = 4, F_LNK = 8, F_EXE = 16 };
 
 #define FIELDS(X) \
 	X(name, uint32_t) X(mode, uint32_t) X(uid, uint32_t) X(gid, uint32_t) \
-	X(link, uint32_t) X(mtime, int64_t) X(depth, uint16_t) X(flags, uint8_t)
+	X(link, uint32_t) X(size, int64_t) X(mtime, int64_t) X(depth, uint16_t) X(flags, uint8_t)
 
 typedef struct {
 	uint32_t n, cap;
@@ -246,6 +246,7 @@ static int load_dir(const char *path, int depth, uint32_t pos)
 		} else if (S_ISREG(st.st_mode) && (st.st_mode & 0111)) fl |= F_EXE;
 		t.name[k] = arena_add(e->d_name, strlen(e->d_name));
 		t.mode[k] = st.st_mode; t.uid[k] = st.st_uid; t.gid[k] = st.st_gid;
+		t.size[k] = S_ISDIR(st.st_mode) ? -1 : st.st_size;
 		t.mtime[k] = st.st_mtime; t.flags[k] = fl;
 	}
 	closedir(d);
@@ -659,6 +660,17 @@ static const char *idname(uint32_t id, int group)
 	return c->name;
 }
 
+static void size_str(int64_t v, char *s, size_t n)
+{
+	if (v < 1024) { snprintf(s, n, "%lldB", (long long)v); return; }
+	double d = v;
+	const char *u = "KMGTP";
+	int i = -1;
+	while (d >= 1024 && i < 4) { d /= 1024; i++; }
+	if (d < 10) snprintf(s, n, "%.1f%c", d, u[i]);
+	else snprintf(s, n, "%.0f%c", d, u[i]);
+}
+
 static void mode_str(uint32_t m, char *s)
 {
 	char t = '-';
@@ -676,7 +688,7 @@ static void mode_str(uint32_t m, char *s)
 	s[10] = 0;
 }
 
-static void draw_left(Buf *b, uint32_t i, int w, int ow, int gw, int show_og, int show_date)
+static void draw_left(Buf *b, uint32_t i, int w, int ow, int gw, int show_og, int show_size, int show_date)
 {
 	int left = w, used;
 	int is_cur = i == cur;
@@ -695,6 +707,14 @@ static void draw_left(Buf *b, uint32_t i, int w, int ow, int gw, int show_og, in
 		left -= put_cols(b, " ", 1, left);
 		c = put_cols(b, g, strlen(g), gw < left ? gw : left); left -= c;
 		b_rep(b, ' ', gw - c < left ? gw - c : left); left -= gw - c < left ? gw - c : left;
+		left -= put_cols(b, " ", 1, left);
+	}
+	if (show_size) {
+		char zs[24] = "";
+		if (T.size[i] >= 0) size_str(T.size[i], zs, sizeof zs);
+		int zl = strlen(zs);
+		b_rep(b, ' ', 6 - zl < left ? 6 - zl : left); left -= 6 - zl < left ? 6 - zl : left;
+		left -= put_cols(b, zs, zl, left);
 		left -= put_cols(b, " ", 1, left);
 	}
 	if (show_date) {
@@ -726,7 +746,7 @@ static void draw_left(Buf *b, uint32_t i, int w, int ow, int gw, int show_og, in
 }
 
 static const char help[] =
-	" j/k:move  l:expand  h:collapse  -:up dir  space:select  Esc:deselect  c:copy  m:move  "
+	" j/k:move  l:expand  h:collapse  -:up dir  space:select  Esc:deselect  c:copy  m:move  d:delete  s:dir size  "
 	"H/J/K/L:scroll preview  r:refresh  q:quit";
 
 static Buf fb;
@@ -753,13 +773,15 @@ static void draw(void)
 	if (gw > 16) gw = 16;
 	int base = 1 + 11 + 8;                   /* marker, perms, room for name */
 	int show_og = lw >= base + ow + gw + 2;
-	int show_date = lw >= base + (show_og ? ow + gw + 2 : 0) + 17;
+	int og_w = show_og ? ow + gw + 2 : 0;
+	int show_date = lw >= base + og_w + 17;
+	int show_size = lw >= base + og_w + (show_date ? 17 : 0) + 7;
 
 	preview_scale(rw - 1, mh);
 	for (int r = 0; r < mh; r++) {
 		b_fmt(&fb, "\x1b[%d;1H", r + 1);
 		uint32_t i = top + r;
-		if (i < T.n) draw_left(&fb, i, lw, ow, gw, show_og, show_date);
+		if (i < T.n) draw_left(&fb, i, lw, ow, gw, show_og, show_size, show_date);
 		else b_rep(&fb, ' ', lw);
 		b_str(&fb, "\x1b[90m\xe2\x94\x82\x1b[0m");
 		preview_row(&fb, r, rw - 1);
@@ -1044,6 +1066,23 @@ out:
 	P.valid = 0;
 }
 
+static int64_t sz_total;
+static int sz_cb(const char *p, const struct stat *st, int t, struct FTW *f)
+{
+	(void)p; (void)f;
+	if (t != FTW_D && t != FTW_DP && t != FTW_DNR && t != FTW_NS) sz_total += st->st_size;
+	return 0;
+}
+
+static void do_size(void)
+{
+	if (!T.n || !(T.flags[cur] & F_DIR)) return;
+	char p[PATH_MAX]; row_path(cur, p);
+	sz_total = 0;
+	nftw(p, sz_cb, 16, FTW_PHYS);
+	T.size[cur] = sz_total;
+}
+
 static void do_delete(void)
 {
 	if (!T.n) return;
@@ -1160,6 +1199,7 @@ int main(int argc, char **argv)
 		case 'c': do_transfer(0); break;
 		case 'm': do_transfer(1); break;
 		case 'd': do_delete(); break;
+		case 's': do_size(); break;
 		case '-': go_up(); break;
 		case 'r': rebuild(); P.valid = 0; break;
 		case 'J': preview_scroll(1, 0); break;
