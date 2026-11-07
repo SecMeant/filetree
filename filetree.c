@@ -25,6 +25,7 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -746,7 +747,7 @@ static void draw_left(Buf *b, uint32_t i, int w, int ow, int gw, int show_og, in
 }
 
 static const char help[] =
-	" j/k:move  l:expand  h:collapse  -:up dir  space:select  Esc:deselect  c:copy  m:move  d:delete  s:dir size  "
+	" j/k:move  l:expand  h:collapse  -:up dir  space:select  Esc:deselect  c:copy  m:move  d:delete  s:dir size  /:fzf  "
 	"H/J/K/L:scroll preview  r:refresh  q:quit";
 
 static Buf fb;
@@ -1118,6 +1119,89 @@ static void do_delete(void)
 	P.valid = 0;
 }
 
+/* Expand ancestors of absolute path `abs` (below root) and put the cursor on it. */
+static int reveal(const char *abs)
+{
+	if (strncmp(abs, root, rootlen) || (abs[rootlen] != '/' && abs[rootlen] != 0)) return -1;
+	const char *p = abs + rootlen;
+	int64_t idx = -1;
+	int d = 0;
+	while (*p == '/') {
+		while (*p == '/') p++;
+		if (!*p) break;
+		const char *e = strchr(p, '/');
+		size_t l = e ? (size_t)(e - p) : strlen(p);
+		uint32_t r = idx < 0 ? 0 : idx + 1;
+		int found = 0;
+		for (; r < T.n && (idx < 0 || T.depth[r] > T.depth[idx]); r++)
+			if (T.depth[r] == d && strlen(NAME(r)) == l && !strncmp(NAME(r), p, l)) { found = 1; break; }
+		if (!found) return -1;
+		idx = r;
+		p += l;
+		if (*p) {
+			if (!(T.flags[r] & F_DIR)) return -1;
+			expand(r);
+			d++;
+		}
+	}
+	if (idx < 0) return -1;
+	cur = idx;
+	return 0;
+}
+
+/* Fuzzy-find below the cursor's directory with fzf and jump to the result. */
+static void do_fzf(void)
+{
+	char scope[PATH_MAX];
+	snprintf(scope, sizeof scope, "%s", root[0] ? root : "/");
+	if (T.n) {
+		row_path(cur, scope);
+		if (!(T.flags[cur] & F_DIR)) {
+			char *sl = strrchr(scope, '/');
+			if (sl && sl != scope) *sl = 0; else if (sl) sl[1] = 0;
+		}
+	}
+	char walker[PATH_MAX + 32], prompt[PATH_MAX + 16];
+	snprintf(walker, sizeof walker, "--walker-root=%s", scope);
+	snprintf(prompt, sizeof prompt, "--prompt=%s> ", scope);
+	int pfd[2];
+	if (pipe(pfd) < 0) { snprintf(status, sizeof status, "pipe: %s", strerror(errno)); return; }
+	term_restore();
+	pid_t pid = fork();
+	if (pid == 0) {
+		dup2(pfd[1], 1);
+		close(pfd[0]); close(pfd[1]);
+		execlp("fzf", "fzf", "--walker=file,dir,hidden", walker, "--scheme=path", prompt, (char *)NULL);
+		_exit(127);
+	}
+	close(pfd[1]);
+	char out[PATH_MAX + 2]; size_t n = 0;
+	if (pid > 0) {
+		ssize_t r;
+		while (n < sizeof out - 1 && (r = read(pfd[0], out + n, sizeof out - 1 - n)) != 0) {
+			if (r < 0) { if (errno == EINTR) continue; break; }
+			n += r;
+		}
+	}
+	close(pfd[0]);
+	int st = 0;
+	if (pid > 0) while (waitpid(pid, &st, 0) < 0 && errno == EINTR) ;
+	term_raw();
+	P.valid = 0;
+	out[n] = 0;
+	char *nl = strchr(out, '\n'); if (nl) *nl = 0;
+	int code = pid > 0 && WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+	if (code == 127) { snprintf(status, sizeof status, "fzf not found"); return; }
+	if (code == 1) { snprintf(status, sizeof status, "no match"); return; }
+	if (code != 0 || !out[0]) { snprintf(status, sizeof status, "cancelled"); return; }
+	char target[2 * PATH_MAX];
+	const char *rel = out;
+	if (!strncmp(rel, "./", 2)) rel += 2;
+	if (rel[0] == '/') snprintf(target, sizeof target, "%s", rel);
+	else snprintf(target, sizeof target, "%s%s%s", scope, scope[1] ? "/" : "", rel);
+	if (reveal(target) < 0) snprintf(status, sizeof status, "not found in tree: %.150s", out);
+}
+
 /* Make the parent of the current root the new root, cursor on the old root. */
 static void go_up(void)
 {
@@ -1201,6 +1285,7 @@ int main(int argc, char **argv)
 		case 'd': do_delete(); break;
 		case 's': do_size(); break;
 		case '-': go_up(); break;
+		case '/': do_fzf(); break;
 		case 'r': rebuild(); P.valid = 0; break;
 		case 'J': preview_scroll(1, 0); break;
 		case 'K': preview_scroll(-1, 0); break;
