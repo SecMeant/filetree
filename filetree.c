@@ -1134,11 +1134,37 @@ out:
 	P.valid = 0;
 }
 
-static int64_t sz_total;
+static int64_t sz_total, sz_files;
+static int64_t sz_last_ms;
+
+static int64_t now_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void fmt_bytes(char *o, size_t n, int64_t v)
+{
+	static const char *u[] = {"B", "K", "M", "G", "T", "P"};
+	double d = (double)v; int i = 0;
+	while (d >= 1024 && i < 5) { d /= 1024; i++; }
+	if (i) snprintf(o, n, "%.1f%s", d, u[i]); else snprintf(o, n, "%lld", (long long)v);
+}
+
 static int sz_cb(const char *p, const struct stat *st, int t, struct FTW *f)
 {
 	(void)p; (void)f;
-	if (t != FTW_D && t != FTW_DP && t != FTW_DNR && t != FTW_NS) sz_total += st->st_size;
+	if (t != FTW_D && t != FTW_DP && t != FTW_DNR && t != FTW_NS) { sz_total += st->st_size; sz_files++; }
+	if ((sz_files & 63) == 0) {
+		int64_t now = now_ms();
+		if (now - sz_last_ms >= 100) {
+			char b[32]; fmt_bytes(b, sizeof b, sz_total);
+			snprintf(status, sizeof status, "sizing... %lld files, %s", (long long)sz_files, b);
+			draw();
+			sz_last_ms = now;
+		}
+	}
 	return 0;
 }
 
@@ -1146,8 +1172,9 @@ static void do_size(void)
 {
 	if (!T.n || !(T.flags[cur] & F_DIR)) return;
 	char p[PATH_MAX]; row_path(cur, p);
-	sz_total = 0;
+	sz_total = 0; sz_files = 0; sz_last_ms = now_ms();
 	nftw(p, sz_cb, 16, FTW_PHYS);
+	status[0] = 0;
 	T.size[cur] = sz_total;
 	szc_set(p, sz_total);
 }
