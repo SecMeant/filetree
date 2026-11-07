@@ -784,7 +784,7 @@ static void draw_left(Buf *b, uint32_t i, int w, int ow, int gw, int show_og, in
 
 static const char help[] =
 	" j/k:move  ^D/^U:half page  l:expand  h:collapse  -:up dir  space:select  Esc:deselect  c:copy  m:move  d:delete  s:dir size  S/M/X:sort size/date/name  /:fzf "
-	"H/J/K/L:scroll preview  r:refresh  q:quit";
+	"H/J/K/L:scroll preview  C-S-d/u:preview page  r:refresh  q:quit";
 
 static Buf fb;
 
@@ -869,7 +869,7 @@ static volatile sig_atomic_t resized, quit_flag;
 static void term_restore(void)
 {
 	if (!raw_on) return;
-	const char s[] = "\x1b[0m\x1b[?25h\x1b[?1049l";
+	const char s[] = "\x1b[0m\x1b[?25h\x1b[<u\x1b[>4;0m\x1b[?1049l";
 	if (write(1, s, sizeof s - 1) < 0) { }
 	tcsetattr(0, TCSAFLUSH, &orig_tio);
 	raw_on = 0;
@@ -885,7 +885,11 @@ static void term_raw(void)
 	t.c_cc[VMIN] = 1; t.c_cc[VTIME] = 0;
 	tcsetattr(0, TCSAFLUSH, &t);
 	raw_on = 1;
-	if (write(1, "\x1b[?1049h", 8) < 0) { }
+	/* alt screen; kitty keyboard protocol (disambiguate) + xterm modifyOtherKeys=1 */
+	{
+		const char on[] = "\x1b[?1049h\x1b[>1u\x1b[>4;1m";
+		if (write(1, on, sizeof on - 1) < 0) { }
+	}
 }
 static void get_size(void)
 {
@@ -899,12 +903,24 @@ static void get_size(void)
 static void on_winch(int s) { (void)s; resized = 1; }
 static void on_term(int s) { (void)s; quit_flag = 1; }
 
-enum { K_NONE = 0, K_EOF = -1, K_ESC = 256, K_UP, K_DOWN, K_LEFT, K_RIGHT };
+enum { K_NONE = 0, K_EOF = -1, K_ESC = 256, K_UP, K_DOWN, K_LEFT, K_RIGHT, K_CSD, K_CSU };
 
 static int input_pending(void)
 {
 	struct pollfd pf = { 0, POLLIN, 0 };
 	return poll(&pf, 1, 0) > 0;
+}
+
+/* Map a (codepoint, modifier bits: shift=1 alt=2 ctrl=4) report to a key. */
+static int decode_mod_key(int cp, int bits)
+{
+	int lc = (cp >= 'A' && cp <= 'Z') ? cp + 32 : cp;
+	if (bits & 2) return K_NONE;
+	if ((bits & 5) == 5) return lc == 'd' ? K_CSD : lc == 'u' ? K_CSU : K_NONE;
+	if (bits & 4) return (lc >= 'a' && lc <= 'z') ? lc - 96 : K_NONE;
+	if (bits & 1) return (cp >= 'a' && cp <= 'z') ? cp - 32 : (cp > 0 && cp < 256) ? cp : K_NONE;
+	if (cp == 27) return K_ESC;
+	return (cp > 0 && cp < 256) ? cp : K_NONE;
 }
 
 static int read_key(void)
@@ -922,10 +938,24 @@ static int read_key(void)
 	if (read(0, &c2, 1) <= 0) return K_ESC;
 	if (c2 != '[' && c2 != 'O') return K_NONE;
 	unsigned char f = 0;
-	while (read(0, &f, 1) > 0 && (f < 0x40 || f > 0x7e)) ;
+	char pb[32]; size_t pn = 0;
+	while (read(0, &f, 1) > 0 && (f < 0x40 || f > 0x7e))
+		if (pn + 1 < sizeof pb) pb[pn++] = f;
+	pb[pn] = 0;
 	switch (f) {
 	case 'A': return K_UP; case 'B': return K_DOWN;
 	case 'C': return K_RIGHT; case 'D': return K_LEFT;
+	case 'u': { /* kitty keyboard protocol: CSI cp[:..] ; mods[:..] u */
+		int cp = atoi(pb), m = 1;
+		char *sc = strchr(pb, ';');
+		if (sc) m = atoi(sc + 1);
+		return decode_mod_key(cp, m > 0 ? m - 1 : 0);
+	}
+	case '~': { /* xterm modifyOtherKeys: CSI 27 ; mods ; cp ~ */
+		int a = 0, m = 1, cp = 0;
+		if (sscanf(pb, "%d;%d;%d", &a, &m, &cp) == 3 && a == 27)
+			return decode_mod_key(cp, m > 0 ? m - 1 : 0);
+	}
 	}
 	return K_NONE;
 }
@@ -1342,6 +1372,8 @@ int main(int argc, char **argv)
 		case '-': go_up(); break;
 		case '/': do_fzf(); break;
 		case 'r': szc_clear(); rebuild(); P.valid = 0; break;
+		case K_CSD: preview_scroll(((term_h - 2) / 2) ? (term_h - 2) / 2 : 1, 0); break;
+		case K_CSU: preview_scroll(-(((term_h - 2) / 2) ? (term_h - 2) / 2 : 1), 0); break;
 		case 'J': preview_scroll(1, 0); break;
 		case 'K': preview_scroll(-1, 0); break;
 		case 'H': preview_scroll(0, -4); break;
