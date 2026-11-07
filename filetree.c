@@ -1044,6 +1044,41 @@ out:
 	P.valid = 0;
 }
 
+static void do_delete(void)
+{
+	if (!T.n) return;
+	char **src = NULL; size_t sn = 0;
+	if (sel_n) {
+		src = xrealloc(NULL, sel_n * sizeof *src);
+		for (size_t i = 0; i < sel_n; i++) src[sn++] = strdup(sel[i]);
+	} else {
+		src = xrealloc(NULL, sizeof *src);
+		char p[PATH_MAX]; row_path(cur, p);
+		src[sn++] = strdup(p);
+	}
+	char label[96], ans[8] = "";
+	snprintf(label, sizeof label, "Delete %zu item%s? Type y to confirm: ", sn, sn == 1 ? "" : "s");
+	if (!prompt_line(label, ans, sizeof ans) || (strcmp(ans, "y") && strcmp(ans, "yes"))) {
+		snprintf(status, sizeof status, "cancelled");
+	} else {
+		int done = 0, failed = 0;
+		char firsterr[128] = "";
+		for (size_t i = 0; i < sn; i++) {
+			if (nftw(src[i], rm_cb, 16, FTW_DEPTH | FTW_PHYS) < 0) {
+				failed++;
+				if (!firsterr[0]) snprintf(firsterr, sizeof firsterr, "%.60s: %s", src[i], strerror(errno));
+			} else done++;
+		}
+		sel_clear();
+		rebuild();
+		if (failed) snprintf(status, sizeof status, "%d deleted, %d failed (%s)", done, failed, firsterr);
+		else snprintf(status, sizeof status, "deleted %d item%s", done, done == 1 ? "" : "s");
+	}
+	for (size_t i = 0; i < sn; i++) free(src[i]);
+	free(src);
+	P.valid = 0;
+}
+
 /* Make the parent of the current root the new root, cursor on the old root. */
 static void go_up(void)
 {
@@ -1124,6 +1159,7 @@ int main(int argc, char **argv)
 		case K_ESC: sel_clear(); break;
 		case 'c': do_transfer(0); break;
 		case 'm': do_transfer(1); break;
+		case 'd': do_delete(); break;
 		case '-': go_up(); break;
 		case 'r': rebuild(); P.valid = 0; break;
 		case 'J': preview_scroll(1, 0); break;
