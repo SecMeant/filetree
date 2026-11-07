@@ -24,4 +24,7 @@ run: $(TARGET)
 clean:
 	rm -f $(TARGET)
 
-.PHONY: all run clean
+install: all
+	install -m 755 -g root -o root -T filetree /usr/local/bin/filetree
+
+.PHONY: all run clean install
