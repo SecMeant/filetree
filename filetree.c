@@ -1136,6 +1136,22 @@ out:
 
 static int64_t sz_total, sz_files;
 static int64_t sz_last_ms;
+static int sz_abort;
+
+/* Drain pending input; true if it holds 'q' or Ctrl-C (raw byte or CSI-u). */
+static int sz_interrupted(void)
+{
+	char b[64];
+	int hit = 0;
+	struct pollfd pf = { 0, POLLIN, 0 };
+	while (poll(&pf, 1, 0) > 0 && (pf.revents & POLLIN)) {
+		ssize_t n = read(0, b, sizeof b - 1);
+		if (n <= 0) break;
+		b[n] = 0;
+		if (memchr(b, 'q', n) || memchr(b, 3, n) || strstr(b, "[99;5u")) hit = 1;
+	}
+	return hit;
+}
 
 static int64_t now_ms(void)
 {
@@ -1157,6 +1173,7 @@ static int sz_cb(const char *p, const struct stat *st, int t, struct FTW *f)
 	(void)p; (void)f;
 	if (t != FTW_D && t != FTW_DP && t != FTW_DNR && t != FTW_NS) { sz_total += st->st_size; sz_files++; }
 	if ((sz_files & 63) == 0) {
+		if (sz_interrupted() || quit_flag) { sz_abort = 1; return 1; }
 		int64_t now = now_ms();
 		if (now - sz_last_ms >= 100) {
 			char b[32]; fmt_bytes(b, sizeof b, sz_total);
@@ -1172,8 +1189,12 @@ static void do_size(void)
 {
 	if (!T.n || !(T.flags[cur] & F_DIR)) return;
 	char p[PATH_MAX]; row_path(cur, p);
-	sz_total = 0; sz_files = 0; sz_last_ms = now_ms();
+	sz_total = 0; sz_files = 0; sz_abort = 0; sz_last_ms = now_ms();
 	nftw(p, sz_cb, 16, FTW_PHYS);
+	if (sz_abort) {
+		snprintf(status, sizeof status, "size cancelled");
+		return;
+	}
 	status[0] = 0;
 	T.size[cur] = sz_total;
 	szc_set(p, sz_total);
